@@ -4,15 +4,6 @@ import select
 import socket
 from threading import Thread
 
-"""
-Running an example several times with too small delay between executions, could lead to this error:
-
-OSError: [Errno 98] Address already in use
-
-This is because the previous execution has left the socket in a TIME_WAIT state, and can't be immediately reused.
-
-the SO_REUSEADDR flag in socket API level SOL_SOCKET, tells the kernel to reuse a local socket in TIME_WAIT state, without waiting for its natural timeout to expire.
-"""
 IP = "127.0.0.1"
 PORT = 5535
 
@@ -49,22 +40,19 @@ class Server:
         while True:
             read, _, _ = select.select(self.socket_list, [], [], 0)
             for socket in read:
-                print("Listen connections")
                 if socket == self.socket:
                     conn, addr = self.socket.accept()
                     print(f"New connection: {conn}, {addr}")
                     self.socket_list.append(conn)
                 else:
-                    print("Else")
                     try:
                         msg = socket.recv(1024)
-                        if msg == b"":
-                            print(socket.getpeername())
-                            continue
-                        else:
+                        if msg == b"exit":
+                            self.socket_list.remove(socket)
+                        elif msg != b"":
                             self.to_be_sent.append((msg, socket))
-                    except Exception:
-                        print(socket.getpeername())
+                    except Exception as e:
+                        print(e)
 
     def handle_connections(self) -> None:
         while True:

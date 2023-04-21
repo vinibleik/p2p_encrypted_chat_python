@@ -6,16 +6,6 @@ import sys
 import traceback
 from threading import Thread
 
-"""
-    threading.Thread python class for Threads
-
-    Its subclasses only can override the __init__ and run methods.
-
-    To start a Thread its method start() need to be called at most once per Thread object, this will arrange to the run method to be invoked in a separated thread of control.
-
-    Daemon threads needs to be set before the call to start() method.
-    The entire Python program exits when no alive non-daemon threads are left. 
-"""
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 5535
 DEFAULT_BUFFSIZE = 1024
@@ -61,6 +51,7 @@ class Client:
                 continue
             data = f"{self.user_name}: {msg}"
             self.socket.send(data.encode())
+        self.socket.send(msg.encode())
 
     def listen(self) -> None:
         while True:
