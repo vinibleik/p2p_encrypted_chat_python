@@ -14,7 +14,7 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 5535
-DEFAULT_BUFSIZE = 4096
+DEFAULT_BUFSIZE = 2048
 
 
 class Client:
@@ -39,7 +39,7 @@ class Client:
 
     def __init_asymmetric_keys(self) -> None:
         self.__private_key = rsa.generate_private_key(
-            public_exponent=65537, key_size=1024
+            public_exponent=65537, key_size=2048
         )
         self.public_key = self.__private_key.public_key()
 
@@ -58,6 +58,7 @@ class Client:
             self.symmetric_key = Fernet(self.__symmetric_key)
 
     def decrypt_asymmetric_message(self, message: bytes) -> bytes:
+        print(len(message))
         return self.__private_key.decrypt(
             message,
             padding=padding.OAEP(
@@ -96,8 +97,8 @@ class Client:
         return msg.encode() + data
 
     def decode_message(self, message: bytes) -> tuple[bytes, bytes, bytes]:
-        (type, user, data, *_) = message.split(b":")
-        return (type, user, data)
+        (type, user, *data) = message.split(b":")
+        return (type, user, b":".join(data))
 
     def run(self) -> None:
         with self.socket as client:

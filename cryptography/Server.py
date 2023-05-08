@@ -6,7 +6,7 @@ from threading import Thread
 
 IP = "127.0.0.1"
 PORT = 5535
-DEFAULT_BUFSIZE = 4096
+DEFAULT_BUFSIZE = 2048
 
 
 class Server:
