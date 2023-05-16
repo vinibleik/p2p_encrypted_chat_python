@@ -1,5 +1,6 @@
 #! /usr/bin/env python
 
+import contextlib
 import select
 import socket
 import sys
@@ -8,9 +9,8 @@ import traceback
 from random import randint
 from threading import Thread
 
-from cryptography.fernet import Fernet, InvalidToken
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import padding, rsa
+from messages import DecodeException, HashException, Message
+from security import AsymmetricKeyRSA, SymmetricKeyFernet
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 5535
@@ -29,7 +29,7 @@ class Client:
         self.host = host
         self.port = port
         self.bufsize = bufsize
-        self.__init_asymmetric_keys()
+        self.asymmetric_key = AsymmetricKeyRSA()
         self.__configure_socket()
         self.run()
 
@@ -37,68 +37,35 @@ class Client:
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
-    def __init_asymmetric_keys(self) -> None:
-        self.__private_key = rsa.generate_private_key(
-            public_exponent=65537, key_size=2048
-        )
-        self.public_key = self.__private_key.public_key()
-
-    def public_key_bytes(self) -> bytes:
-        return self.public_key.public_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo,
-        )
-
     def __init_symmetric_keys(self, key: bytes = b"") -> None:
-        if key:
-            self.__symmetric_key = key
-            self.symmetric_key = Fernet(key)
-        else:
-            self.__symmetric_key = Fernet.generate_key()
-            self.symmetric_key = Fernet(self.__symmetric_key)
+        self.symmetric_key = SymmetricKeyFernet(key=key)
 
-    def decrypt_asymmetric_message(self, message: bytes) -> bytes:
-        print(len(message))
-        return self.__private_key.decrypt(
-            message,
-            padding=padding.OAEP(
-                mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                algorithm=hashes.SHA256(),
-                label=None,
-            ),
+    def new_message(self, data: bytes, code: bytes = b"message") -> bytes:
+        msg = Message(
+            sender=self.user_name.encode(),
+            data=data,
+            code=code,
         )
+        return msg.serialize_message()
 
-    def encrypt_asymmetric_message(
-        self, message: bytes, peer_public_key: bytes = b""
-    ) -> bytes:
-        public_key = (
-            serialization.load_pem_public_key(peer_public_key)
-            if peer_public_key
-            else self.public_key
+    def decode_message(self, message: bytes) -> Message:
+        return Message.deserialize_message(message)
+
+    def send_public_key(self) -> None:
+        msg = self.new_message(
+            data=self.asymmetric_key.get_public_key(), code=b"public_key"
         )
+        self.socket.send(msg)
 
-        return public_key.encrypt(
-            message,
-            padding=padding.OAEP(
-                mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                algorithm=hashes.SHA256(),
-                label=None,
-            ),
+    def send_symmetric_key(self, public_key: bytes) -> None:
+        msg = self.new_message(
+            data=self.symmetric_key.get_symmetric_key(),
+            code=b"symmetric_key",
         )
-
-    def decrypt_symmetric_message(self, message: bytes) -> bytes:
-        return self.symmetric_key.decrypt(message)
-
-    def encrypt_symmetric_message(self, message: bytes) -> bytes:
-        return self.symmetric_key.encrypt(message)
-
-    def new_message(self, data: bytes, type: str = "msg") -> bytes:
-        msg = f"{type}:{self.user_name}:"
-        return msg.encode() + data
-
-    def decode_message(self, message: bytes) -> tuple[bytes, bytes, bytes]:
-        (type, user, *data) = message.split(b":")
-        return (type, user, b":".join(data))
+        enc_msg = AsymmetricKeyRSA.pem_public_encrypt(
+            pem_public_key=public_key, message=msg
+        )
+        self.socket.send(enc_msg)
 
     def run(self) -> None:
         with self.socket as client:
@@ -111,19 +78,30 @@ class Client:
             )
 
             time.sleep(1)
-            msg = self.new_message(self.public_key_bytes(), type="public_key")
-            client.send(msg)
-            (type, _, data) = self.decode_message(client.recv(self.bufsize))
-            if type == b"public_key":
-                self.__init_symmetric_keys()
-                msg = self.encrypt_asymmetric_message(
-                    self.__symmetric_key, data
-                )
-                msg = self.new_message(msg, type="symmetric_key")
-                client.send(msg)
-            elif type == b"symmetric_key":
-                data = self.decrypt_asymmetric_message(data)
-                self.__init_symmetric_keys(key=data)
+            self.send_public_key()
+
+            msg = client.recv(self.bufsize)
+            with contextlib.suppress(Exception):
+                msg = self.asymmetric_key.decrypt(msg)
+
+            try:
+                message = Message.deserialize_message(msg)
+            except (DecodeException, HashException) as e:
+                client.send(b"exit")
+                raise SystemExit(
+                    "Erro no estabelecimento de segurança!"
+                ) from e
+
+            match message.m_code():
+                case b"public_key":
+                    self.__init_symmetric_keys()
+                    self.send_symmetric_key(message.m_data())
+                case b"symmetric_key":
+                    self.__init_symmetric_keys(message.m_data())
+                case _:
+                    print(f"{self.user_name} saindo... no run")
+                    client.send(b"exit")
+                    raise SystemExit("Erro no estabelecimento de segurança!")
 
             thread_send = Thread(target=self.send)
             thread_listen = Thread(target=self.listen, daemon=True)
@@ -136,7 +114,7 @@ class Client:
             if msg == "":
                 continue
             data = self.new_message(msg.encode())
-            encrypted_data = self.encrypt_symmetric_message(data)
+            encrypted_data = self.symmetric_key.encrypt(data)
             self.socket.send(encrypted_data)
         self.socket.send(msg.encode())
 
@@ -145,23 +123,28 @@ class Client:
             [read], _, _ = select.select([self.socket], [], [])
             try:
                 msg = read.recv(self.bufsize)
+
+                with contextlib.suppress(Exception):
+                    msg = self.symmetric_key.decrypt(msg)
+
                 try:
-                    decrypted_msg = self.decrypt_symmetric_message(message=msg)
-                except InvalidToken:
-                    decrypted_msg = msg
-                (type, user, data) = self.decode_message(decrypted_msg)
-                if type == b"msg":
-                    print(
-                        f"Message from {user.decode()}: {data.decode()}\n>> ",
-                        end="",
-                    )
-                elif type == b"public_key":
-                    msg = self.encrypt_asymmetric_message(
-                        self.__symmetric_key, data
-                    )
-                    msg = self.new_message(msg, type="symmetric_key")
-                    time.sleep(randint(1, 10))
-                    read.send(msg)
+                    message = Message.deserialize_message(msg)
+                except (DecodeException, HashException):
+                    continue
+
+                match message.m_code():
+                    case b"message":
+                        sender = message.m_sender().decode()
+                        msg = message.m_data().decode()
+                        print(
+                            f"Message from {sender}: {msg}\n>> ",
+                            end="",
+                        )
+                    case b"public_key":
+                        # time.sleep(randint(1, 10))
+                        self.send_symmetric_key(message.m_data())
+                    case _:
+                        continue
             except Exception:
                 traceback.print_exc(file=sys.stdout)
                 break
